@@ -5,91 +5,81 @@ on:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - name: Fetch official Binance historical archives
+      - name: Fetch Binance market-data-only klines
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request, urllib.error, zipfile, io, csv, datetime, hashlib
+          import json, urllib.request, urllib.parse, urllib.error, datetime
           from decimal import Decimal
 
-          UA={"User-Agent":"Mozilla/5.0"}
+          START=datetime.datetime(2024,1,1,tzinfo=datetime.timezone.utc)
+          END=datetime.datetime(2026,8,1,tzinfo=datetime.timezone.utc)
+          START_MS=int(START.timestamp()*1000)
+          END_MS=int(END.timestamp()*1000)-1
+          assets={"FET":["FET"],"RENDER":["RNDR","RENDER"],"INJ":["INJ"],"ORDI":["ORDI"],"UNI":["UNI"],"AVAX":["AVAX"]}
+
+          def fetch(alias):
+              q=urllib.parse.urlencode({"symbol":alias+"TRY","interval":"1d","startTime":START_MS,"endTime":END_MS,"limit":1000})
+              url="https://data-api.binance.vision/api/v3/klines?"+q
+              req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0","Accept":"application/json"})
+              try:
+                  with urllib.request.urlopen(req,timeout=30) as r:
+                      b=r.read().decode("utf-8","replace")
+                      x=json.loads(b)
+                      print("FETCH",alias,r.status,len(x),url)
+                      return x if isinstance(x,list) else []
+              except urllib.error.HTTPError as e:
+                  b=e.read().decode("utf-8","replace")
+                  print("HTTPERR",alias,e.code,b[:500],url); return []
+              except Exception as e:
+                  print("ERR",alias,repr(e),url); return []
+
+          raw={}
+          for coin,aliases in assets.items():
+              bag=[]
+              for alias in aliases:
+                  for row in fetch(alias):
+                      if isinstance(row,list) and len(row)>=5:
+                          bag.append((int(row[0]),alias,row))
+              by={}
+              for ts,alias,row in bag:
+                  old=by.get(ts)
+                  if old is None or alias=="RENDER":
+                      by[ts]=(alias,row)
+              raw[coin]=[v[1] for _,v in sorted(by.items())]
+
+          def monthly(rows):
+              out={}
+              for r in rows:
+                  ts=int(r[0]); dt=datetime.datetime.fromtimestamp(ts/1000,datetime.timezone.utc)
+                  ym=f"{dt.year:04d}-{dt.month:02d}"
+                  o,h,l,c=map(Decimal,[str(r[1]),str(r[2]),str(r[3]),str(r[4])])
+                  if ym not in out: out[ym]=[o,h,l,c,ts,ts]
+                  else:
+                      d=out[ym]
+                      if ts<d[4]: d[0]=o; d[4]=ts
+                      d[1]=max(d[1],h); d[2]=min(d[2],l)
+                      if ts>d[5]: d[3]=c; d[5]=ts
+              return out
+
+          def fmt(x):
+              s=format(x,"f")
+              return s.rstrip("0").rstrip(".") if "." in s else s
+
           months=[]; y,m=2024,1
           while (y,m)<=(2026,7):
               months.append(f"{y:04d}-{m:02d}")
               y,m=(y+1,1) if m==12 else (y,m+1)
 
-          assets={"FET":["FET"],"RENDER":["RNDR","RENDER"],"INJ":["INJ"],"ORDI":["ORDI"],"UNI":["UNI"],"AVAX":["AVAX"]}
-
-          def download(url):
-              r=urllib.request.Request(url,headers=UA)
-              try:
-                  with urllib.request.urlopen(r,timeout=30) as x:
-                      return x.status,x.read()
-              except urllib.error.HTTPError as e:
-                  return e.code,b""
-              except Exception as e:
-                  print("ERR",url,repr(e)); return -1,b""
-
-          def rows_for(symbol,ym):
-              url=f"https://data.binance.vision/data/spot/monthly/klines/{symbol}TRY/1d/{symbol}TRY-1d-{ym}.zip"
-              st,data=download(url)
-              if st!=200:
-                  print("ARCHIVE",symbol,ym,st)
-                  return []
-              # Verify against official checksum when available.
-              cs_url=url+".CHECKSUM"
-              cs_st,cs=download(cs_url)
-              if cs_st==200:
-                  expected=cs.decode("utf-8","replace").strip().split()[0].lower()
-                  actual=hashlib.sha256(data).hexdigest().lower()
-                  if expected!=actual:
-                      raise RuntimeError(f"SHA256 mismatch {url}: {expected} != {actual}")
-              with zipfile.ZipFile(io.BytesIO(data)) as z:
-                  names=z.namelist()
-                  if not names: return []
-                  raw=z.read(names[0]).decode("utf-8","replace").splitlines()
-              out=[]
-              for row in csv.reader(raw):
-                  if len(row)>=5 and row[0].strip().isdigit():
-                      out.append(row)
-              print("ARCHIVE_OK",symbol,ym,len(out),"sha",hashlib.sha256(data).hexdigest())
-              return out
-
-          def norm_ts(v):
-              n=int(v)
-              # Binance Vision Spot timestamps from 2025 onward can be microseconds.
-              while n>9999999999999:
-                  n//=1000
-              return n
-
-          print("=== RESULT_BEGIN ===")
-          for coin,aliases in assets.items():
-              print("@@@",coin)
+          print("===RESULT_BEGIN===")
+          for coin in ["FET","RENDER","INJ","ORDI","UNI","AVAX"]:
+              mm=monthly(raw.get(coin,[]))
+              print("@@@",coin,"daily",len(raw.get(coin,[])),"months",len(mm))
               for ym in months:
-                  bag=[]
-                  for alias in aliases:
-                      for row in rows_for(alias,ym):
-                          bag.append((norm_ts(row[0]),alias,row))
-                  if not bag:
-                      print("|".join([coin,ym,"YOK","YOK","YOK","YOK"]))
-                      continue
-                  bag.sort(key=lambda x:x[0])
-                  # If both aliases overlap after the migration, prefer RENDER for duplicate timestamps.
-                  by={}
-                  for ts,alias,row in bag:
-                      old=by.get(ts)
-                      if old is None or alias=="RENDER":
-                          by[ts]=(alias,row)
-                  ordered=[by[k][1] for k in sorted(by)]
-                  op=Decimal(ordered[0][1])
-                  hi=max(Decimal(r[2]) for r in ordered)
-                  lo=min(Decimal(r[3]) for r in ordered)
-                  cl=Decimal(ordered[-1][4])
-                  def fmt(x):
-                      s=format(x,"f")
-                      return s.rstrip("0").rstrip(".") if "." in s else s
-                  print("|".join([coin,ym,fmt(op),fmt(hi),fmt(lo),fmt(cl)]))
-          print("=== RESULT_END ===")
+                  d=mm.get(ym)
+                  if d: print("|".join([coin,ym,fmt(d[0]),fmt(d[1]),fmt(d[2]),fmt(d[3])]))
+                  else: print("|".join([coin,ym,"YOK","YOK","YOK","YOK"]))
+          print("===RESULT_END===")
           PY
