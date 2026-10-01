@@ -2,107 +2,94 @@ name: BinanceTR OHLC temp
 on:
   push:
     branches: [main]
-  issues:
-    types: [opened]
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Fetch Binance TR OHLC
+      - name: Fetch official Binance historical archives
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, urllib.request, urllib.parse, urllib.error, datetime, time
+          import urllib.request, urllib.error, zipfile, io, csv, datetime, hashlib
           from decimal import Decimal
 
-          START=datetime.datetime(2024,1,1,tzinfo=datetime.timezone.utc)
-          END=datetime.datetime(2026,8,1,tzinfo=datetime.timezone.utc)
-          START_MS=int(START.timestamp()*1000)
-          END_MS=int(END.timestamp()*1000)-1
-
-          def req(url):
-              h={"User-Agent":"Mozilla/5.0","Accept":"application/json,text/plain,*/*","Referer":"https://www.binance.tr/","Origin":"https://www.binance.tr"}
-              r=urllib.request.Request(url,headers=h)
-              try:
-                  with urllib.request.urlopen(r,timeout=30) as x:
-                      return x.status,x.read().decode("utf-8","replace")
-              except urllib.error.HTTPError as e:
-                  return e.code,e.read().decode("utf-8","replace")
-              except Exception as e:
-                  return -1,repr(e)
-
-          def parse(body):
-              x=json.loads(body)
-              if isinstance(x,dict): x=x.get("data",x.get("result",x))
-              if not isinstance(x,list): raise ValueError(repr(x)[:300])
-              return x
-
-          def fetch(alias):
-              candidates=[
-                ("https://api.binance.me/api/v1/klines",alias+"TRY"),
-                ("https://api.binance.me/api/v1/klines",alias+"_TRY"),
-                ("https://cloudme-tr.2meta.app/api/v1/klines",alias+"_TRY"),
-                ("https://cloudme-tr.2meta.app/api/v1/klines",alias+"TRY"),
-              ]
-              for base,sym in candidates:
-                  q=urllib.parse.urlencode({"symbol":sym,"interval":"1d","startTime":START_MS,"endTime":END_MS,"limit":1000})
-                  url=base+"?"+q
-                  st,b=req(url)
-                  print("TRY",alias,st,url,b[:200].replace("\n"," "))
-                  if st==200:
-                      try:
-                          rows=parse(b)
-                          if rows:
-                              print("OK",alias,len(rows),url)
-                              return rows
-                      except Exception as e: print("PARSE",alias,repr(e))
-              return []
-
-          assets={"FET":["FET"],"RENDER":["RNDR","RENDER"],"INJ":["INJ"],"ORDI":["ORDI"],"UNI":["UNI"],"AVAX":["AVAX"]}
-          allrows={}
-          for coin,aliases in assets.items():
-              bag=[]
-              for a in aliases:
-                  for row in fetch(a):
-                      try:
-                          ts=int(row[0])
-                          if START_MS<=ts<=END_MS: bag.append((a,row))
-                      except: pass
-                  time.sleep(.2)
-              by={}
-              for a,row in bag:
-                  ts=int(row[0])
-                  if ts not in by or a=="RENDER": by[ts]=(a,row)
-              allrows[coin]=[v[1] for _,v in sorted(by.items())]
-
-          def monthly(rows):
-              out={}
-              for r in rows:
-                  ts=int(r[0]); dt=datetime.datetime.fromtimestamp(ts/1000,datetime.timezone.utc)
-                  ym=f"{dt.year:04d}-{dt.month:02d}"
-                  o,h,l,c=map(Decimal,map(str,r[1:5]))
-                  if ym not in out: out[ym]=[o,h,l,c,ts,ts]
-                  else:
-                      d=out[ym]
-                      if ts<d[4]: d[0]=o; d[4]=ts
-                      d[1]=max(d[1],h); d[2]=min(d[2],l)
-                      if ts>d[5]: d[3]=c; d[5]=ts
-              return out
-          def fmt(x):
-              s=format(x,"f")
-              return s.rstrip("0").rstrip(".") if "." in s else s
+          UA={"User-Agent":"Mozilla/5.0"}
           months=[]; y,m=2024,1
           while (y,m)<=(2026,7):
               months.append(f"{y:04d}-{m:02d}")
               y,m=(y+1,1) if m==12 else (y,m+1)
 
-          print("===RESULT_BEGIN===")
-          for coin in assets:
-              mm=monthly(allrows[coin]); print("@@@",coin,"daily",len(allrows[coin]),"months",len(mm))
+          assets={"FET":["FET"],"RENDER":["RNDR","RENDER"],"INJ":["INJ"],"ORDI":["ORDI"],"UNI":["UNI"],"AVAX":["AVAX"]}
+
+          def download(url):
+              r=urllib.request.Request(url,headers=UA)
+              try:
+                  with urllib.request.urlopen(r,timeout=30) as x:
+                      return x.status,x.read()
+              except urllib.error.HTTPError as e:
+                  return e.code,b""
+              except Exception as e:
+                  print("ERR",url,repr(e)); return -1,b""
+
+          def rows_for(symbol,ym):
+              url=f"https://data.binance.vision/data/spot/monthly/klines/{symbol}TRY/1d/{symbol}TRY-1d-{ym}.zip"
+              st,data=download(url)
+              if st!=200:
+                  print("ARCHIVE",symbol,ym,st)
+                  return []
+              # Verify against official checksum when available.
+              cs_url=url+".CHECKSUM"
+              cs_st,cs=download(cs_url)
+              if cs_st==200:
+                  expected=cs.decode("utf-8","replace").strip().split()[0].lower()
+                  actual=hashlib.sha256(data).hexdigest().lower()
+                  if expected!=actual:
+                      raise RuntimeError(f"SHA256 mismatch {url}: {expected} != {actual}")
+              with zipfile.ZipFile(io.BytesIO(data)) as z:
+                  names=z.namelist()
+                  if not names: return []
+                  raw=z.read(names[0]).decode("utf-8","replace").splitlines()
+              out=[]
+              for row in csv.reader(raw):
+                  if len(row)>=5 and row[0].strip().isdigit():
+                      out.append(row)
+              print("ARCHIVE_OK",symbol,ym,len(out),"sha",hashlib.sha256(data).hexdigest())
+              return out
+
+          def norm_ts(v):
+              n=int(v)
+              # Binance Vision Spot timestamps from 2025 onward can be microseconds.
+              while n>9999999999999:
+                  n//=1000
+              return n
+
+          print("=== RESULT_BEGIN ===")
+          for coin,aliases in assets.items():
+              print("@@@",coin)
               for ym in months:
-                  d=mm.get(ym)
-                  if d: print("|".join([coin,ym,fmt(d[0]),fmt(d[1]),fmt(d[2]),fmt(d[3])]))
-                  else: print("|".join([coin,ym,"YOK","YOK","YOK","YOK"]))
-          print("===RESULT_END===")
+                  bag=[]
+                  for alias in aliases:
+                      for row in rows_for(alias,ym):
+                          bag.append((norm_ts(row[0]),alias,row))
+                  if not bag:
+                      print("|".join([coin,ym,"YOK","YOK","YOK","YOK"]))
+                      continue
+                  bag.sort(key=lambda x:x[0])
+                  # If both aliases overlap after the migration, prefer RENDER for duplicate timestamps.
+                  by={}
+                  for ts,alias,row in bag:
+                      old=by.get(ts)
+                      if old is None or alias=="RENDER":
+                          by[ts]=(alias,row)
+                  ordered=[by[k][1] for k in sorted(by)]
+                  op=Decimal(ordered[0][1])
+                  hi=max(Decimal(r[2]) for r in ordered)
+                  lo=min(Decimal(r[3]) for r in ordered)
+                  cl=Decimal(ordered[-1][4])
+                  def fmt(x):
+                      s=format(x,"f")
+                      return s.rstrip("0").rstrip(".") if "." in s else s
+                  print("|".join([coin,ym,fmt(op),fmt(hi),fmt(lo),fmt(cl)]))
+          print("=== RESULT_END ===")
           PY
