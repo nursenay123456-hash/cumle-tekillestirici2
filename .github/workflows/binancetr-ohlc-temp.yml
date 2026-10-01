@@ -2,6 +2,8 @@ name: BinanceTR OHLC temp
 on:
   push:
     branches: [main]
+  issues:
+    types: [opened]
 jobs:
   fetch:
     runs-on: ubuntu-latest
