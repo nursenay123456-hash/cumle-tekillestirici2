@@ -144,3 +144,5 @@ jobs:
                       print("|".join([base,ym,"YOK","YOK","YOK","YOK",str(typ),src or ""]))
           print("===RESULT_END===")
           PY
+
+# trigger
