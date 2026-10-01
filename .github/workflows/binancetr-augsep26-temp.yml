@@ -142,6 +142,17 @@ jobs:
                       print("|".join([base,ym,rnd(d["open"]),rnd(d["low"]),rnd(d["high"]),rnd(d["close"]),str(typ),src or ""]))
                   else:
                       print("|".join([base,ym,"YOK","YOK","YOK","YOK",str(typ),src or ""]))
+
+          print("===TYPE3_DIAGNOSTIC_BEGIN===")
+          for base in TARGETS:
+              symbol=base+"_TRY"
+              q=urllib.parse.urlencode({"symbol":symbol,"interval":"1d","startTime":START_MS,"endTime":END_MS,"limit":1000})
+              url="https://cloudme-tr.2meta.app/api/v1/klines?"+q
+              st,obj,raw=http_json(url)
+              rows=parse_kline_payload(obj) if obj is not None else []
+              print("TYPE3CHECK|"+base+"|"+str(st)+"|"+str(len(rows))+"|"+raw.replace("\n"," ")[:120])
+          print("===TYPE3_DIAGNOSTIC_END===")
+
           print("===RESULT_END===")
           PY
 
